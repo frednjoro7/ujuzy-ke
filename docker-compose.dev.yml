@@ -1,0 +1,306 @@
+version: "3"
+
+services:
+  ##############################################
+  ###        Traefik Proxy Setup           #####
+  ##############################################
+  webproxy:
+    container_name: "webproxy"
+    image: traefik:v2.2.8
+    restart: always
+    command:
+      ## API Settings
+      - --api.insecure=true # <== Enabling insecure api, NOT RECOMMENDED FOR PRODUCTION
+      - --api.dashboard=true
+      - --api.debug=true # <== Enabling additional endpoints for debugging and profiling
+      ## Log Settings (options: ERROR, DEBUG, PANIC, FATAL, WARN, INFO)
+      - --log.level=DEBUG # <== Setting the level of the logs from traefik
+       ## Provider Settings
+      - --providers.docker
+      - --providers.docker.exposedbydefault=false # <== Don't expose every container to traefik, only expose enabled ones
+      - --providers.docker.network=web
+      ## Entrypoints Settings
+      - --entrypoints.web.address=:80
+    ports:
+      - 80:80
+      - 8080:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - web
+    labels:
+      # Dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.webproxy.rule=Host(`monitor.ujuzy.localhost`)"
+      - "traefik.http.routers.webproxy.service=api@internal"
+      - "traefik.http.routers.webproxy.entrypoints=web"
+      - "traefik.http.routers.webproxy.middlewares=authtraefik"
+      - "traefik.http.middlewares.authtraefik.basicauth.users=user:$$apr1$$q8eZFHjF$$Fvmkk//V6Btlaf2i/ju5n/" # user/password
+
+  ################################################
+  ####         WebUI Container Service      #####
+  ################################################
+  ujuzy_frontend:
+    container_name: "ujuzy_frontend"
+    image: "ujuzy-frontend:php7.2-fpm"
+    build:
+      context: ./webui
+      dockerfile: Dockerfile
+    volumes:
+      - webui/:/var/www
+    networks:
+      - backend
+    expose:
+      - "9000"
+    depends_on:
+      - ujuzy_backend    
+    #   - traefik
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.nginx.rule=Host(`ujuzy.localhost`)"
+    #   - "traefik.http.routers.nginx.entrypoints=web"       
+
+  ################################################
+  ####         WebAPI Container Service      #####
+  ################################################
+  ujuzy_backend:
+    container_name: "ujuzy_backend"
+    image: "ujuzy-backend:php7.2-fpm"
+    build:
+      context: ./webapi
+      dockerfile: Dockerfile
+    volumes:
+      - webapi/:/var/www
+    networks:
+      - backend
+    expose:
+      - "9000"
+    depends_on:
+      - mysqldb  
+     
+  ##############################################
+  ####       Nginx Container Service        ####
+  ##############################################      
+  nginx:
+    container_name: nginx
+    image: "ujuzy-backend-nginx:dev"
+    build:
+      context: ./webapi/nginx
+      dockerfile: nginx.dockerfile
+    depends_on:
+      - ujuzy_backend
+    networks:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443" 
+    depends_on:
+      - ujuzy_backend     
+    #   - traefik
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.nginx.rule=Host(`api.ujuzy.localhost`)"
+    #   - "traefik.http.routers.nginx.entrypoints=web" 
+  ##############################################
+  ####       MySQL DB Container Service     ####
+  ##############################################    
+  mysqldb:
+    container_name: mysqldb
+    image: mysql
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - dbdata_mysql:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=atugoKODU@!
+      - MYSQL_DATABASE=ujuzy
+      - MYSQL_USER=dev_user
+      - MYSQL_PASSWORD=dev_password
+    networks:
+      - backend
+    ports:
+      - "3306:3306"
+
+  ##############################################
+  ####    KEYCLOAK DB Container Service     ####
+  ##############################################    
+  postgres:
+      image: postgres
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+      environment:
+        POSTGRES_DB: keycloak
+        POSTGRES_USER: keycloak
+        POSTGRES_PASSWORD: dev_password
+
+  ##############################################
+  ####     KEYCLOAK Container Service       ####
+  ##############################################       
+  keycloak:
+      image: jboss/keycloak
+      environment:
+        DB_VENDOR: POSTGRES
+        DB_ADDR: postgres
+        DB_DATABASE: keycloak
+        DB_USER: keycloak
+        DB_SCHEMA: public
+        DB_PASSWORD: dev_password
+        KEYCLOAK_USER: admin
+        KEYCLOAK_PASSWORD: dev_password
+        # Uncomment the line below if you want to specify JDBC parameters. The parameter below is just an example, and it shouldn't be used in production without knowledge. It is highly recommended that you read the PostgreSQL JDBC driver documentation in order to use it.
+        #JDBC_PARAMS: "ssl=true"
+      ports:
+        - 8080:8080
+      depends_on:
+        - postgres
+
+  ##############################################
+  ####       ES Container Service           ####
+  ##############################################      
+  elasticsearch:
+    container_name: "es"
+    image: docker.elastic.co/elasticsearch/elasticsearch:6.4.3
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - dbdata_es01:/usr/share/elasticsearch/data
+    networks:
+      - backend
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+
+  ##############################################
+  ####       Kibana Container Service       ####
+  ##############################################    
+  kibana:
+    container_name: "kibana"
+    image: docker.elastic.co/kibana/kibana:6.4.3
+    environment:
+      - XPACK_MONITORING_ENABLED=false
+      - ELASTICSEARCH_HOSTS=es
+    networks:
+      - backend
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  ##############################################
+  ####       RabbitMQ Container Service     ####
+  ##############################################
+  ampq:
+    container_name: ampq
+    hostname: rabbit_ujuzy_backend
+    image: rabbitmq:management
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    networks:
+      - backend
+    ports:
+      - "15672:15672"
+      - "5672"
+    
+  
+  ##############################################
+  ####       Minio Container Service        ####
+  ##############################################  
+  minio:
+    container_name: minio
+    image: minio/minio
+    environment:
+      - MINIO_SECRET_KEY=minio_secret_key
+      - MINIO_ACCESS_KEY=minio_access_key
+    volumes:
+      - minio_data:/data
+    command: ["server", "/data"]
+    networks:
+      - backend
+    ports:
+      - "9090:9000"
+
+  ##############################################
+  ####       Redis Container Service        ####
+  ##############################################
+  # redismq:
+  #   container_name: redismq  
+  #   image: redis:6.0.6
+  #   restart: always
+  #   ports:
+  #     - "6379:6379"
+
+  ##############################################
+  ####       Thumbor Container Service      ####
+  ##############################################
+  # thumbor:
+  #   container_name: thumbor
+  #   image: minimalcompact/thumbor
+  #   restart: always
+  #   env_file:
+  #     - docker/env/.env.thumbor
+  #   networks:
+  #     - web
+  #     - backend
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.flowcache.rule=Host(`flowcache.fmb.localhost`)"
+  #     - "traefik.http.routers.flowcache.entrypoints=web"    
+
+  ##############################################
+  ####      Rocketchat Container Service    ####
+  ##############################################
+  # rocketchat:
+  #   image: rocketchat/rocket.chat:3.5.0
+  #   restart: unless-stopped
+  #   command: >
+  #     bash -c
+  #       "for i in `seq 1 30`; do
+  #         INSTANCE_IP=$$(hostname -i) node main.js &&
+  #         s=$$? && break || s=$$?;
+  #         echo \"Tried $$i times. Waiting 5 secs...\";
+  #         sleep 5;
+  #       done; (exit $$s)"
+  #   mem_limit: 2G
+  #  volumes:
+  #   - rocketchat/data/uploads:/app/uploads
+  #   - /tmp:/tmp
+  #  environment:
+  #   - PORT=3000
+  #   - ROOT_URL=http://${ROCKETCHAT_HOST}
+  #   - MONGO_URL=mongodb://mongo:27017/rocketchat
+  #   - MONGO_OPLOG_URL=mongodb://mongo:27017/local
+  #   networks:
+  #     - backend
+  #     - web
+  #   depends_on:
+  #     - mongo
+  #     - traefik
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.rocketchat.rule=Host(`fmb-chat.fmb.localhost`)"
+  #     - "traefik.http.routers.rocketchat.entrypoints=web"
+
+  # mongo:
+  #   image: mongo:4.0
+  #   restart: unless-stopped 
+  #   command: mongod --smallfiles --oplogSize 128 --replSet rs0 --storageEngine=mmapv1
+      # volumes:
+      # - rocketchat/data/db:/data/db
+      # - rocketchat/data/backups:/dump
+  #   networks:
+  #     - backend
+networks:
+  backend:
+    driver: "bridge"
+volumes:
+  dbdata_mysql:
+    driver: local
+  postgres_data:
+    driver: local
+  dbdata_es01:
+    driver: local
+  dbdata_kibana:
+    driver: local
+  minio_data:
+    driver: local
